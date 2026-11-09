@@ -4,7 +4,6 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.AudioRecord
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
@@ -36,12 +35,6 @@ class MusicMicEngine(private val context: Context) {
     private val _isMusicOnlyActive = MutableStateFlow(false)
     val isMusicOnlyActive: StateFlow<Boolean> = _isMusicOnlyActive.asStateFlow()
 
-    private val _isCallInjectionActive = MutableStateFlow(true) // Call & VoIP stream injection
-    val isCallInjectionActive: StateFlow<Boolean> = _isCallInjectionActive.asStateFlow()
-
-    private val _isHardwareMicMuted = MutableStateFlow(false)
-    val isHardwareMicMuted: StateFlow<Boolean> = _isHardwareMicMuted.asStateFlow()
-
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
@@ -51,17 +44,11 @@ class MusicMicEngine(private val context: Context) {
     private val _musicLevel = MutableStateFlow(0f)
     val musicLevel: StateFlow<Float> = _musicLevel.asStateFlow()
 
-    private val _rawMicDetectedLevel = MutableStateFlow(0f) // Voice in room
-    val rawMicDetectedLevel: StateFlow<Float> = _rawMicDetectedLevel.asStateFlow()
-
-    private val _transmittedVoiceLevel = MutableStateFlow(0f) // Always 0% when active
-    val transmittedVoiceLevel: StateFlow<Float> = _transmittedVoiceLevel.asStateFlow()
-
     private val _selectedTrack = MutableStateFlow(
         AudioTrackItem(
             id = "preset_lofi",
             title = "লো-ফাই চিল সুর (Lo-Fi Chill)",
-            subtitle = "সিস্টেম জেনারেটেড ক্লিন মিউজিক",
+            subtitle = "ক্লিন ব্যাকগ্রাউন্ড মিউজিক",
             synthPreset = SynthPreset.LOFI_CHILL
         )
     )
@@ -70,13 +57,12 @@ class MusicMicEngine(private val context: Context) {
     private val _savedClips = MutableStateFlow<List<RecordedVoiceClip>>(emptyList())
     val savedClips: StateFlow<List<RecordedVoiceClip>> = _savedClips.asStateFlow()
 
-    private val _previewPlayingClipId = MutableStateFlow<String?>(null)
-    val previewPlayingClipId: StateFlow<String?> = _previewPlayingClipId.asStateFlow()
+    private val _lastRecordedClip = MutableStateFlow<RecordedVoiceClip?>(null)
+    val lastRecordedClip: StateFlow<RecordedVoiceClip?> = _lastRecordedClip.asStateFlow()
 
-    // Playback media players
+    // Smooth playback via MediaPlayer only (NO raw AudioTrack buzzing)
     private var backgroundMediaPlayer: MediaPlayer? = null
     private var previewMediaPlayer: MediaPlayer? = null
-    private var synthPlaybackJob: Job? = null
     private var recordingJob: Job? = null
     private var visualizerJob: Job? = null
 
@@ -91,11 +77,11 @@ class MusicMicEngine(private val context: Context) {
     fun setMusicOnlyActive(active: Boolean) {
         _isMusicOnlyActive.value = active
         if (active) {
-            applyMicMuteAndCallRouting(true)
+            applySafeAudioRouting(true)
             requestAudioFocus()
             startMusicPlayback()
         } else {
-            applyMicMuteAndCallRouting(false)
+            applySafeAudioRouting(false)
             stopMusicPlayback()
             if (_isRecording.value) {
                 stopRecording()
@@ -103,34 +89,14 @@ class MusicMicEngine(private val context: Context) {
         }
     }
 
-    fun setCallInjectionActive(active: Boolean) {
-        _isCallInjectionActive.value = active
-        if (_isMusicOnlyActive.value) {
-            applyMicMuteAndCallRouting(true)
-            // Restart playback with updated audio attributes
-            stopMusicPlayback()
-            startMusicPlayback()
-        }
-    }
-
-    private fun applyMicMuteAndCallRouting(enable: Boolean) {
+    private fun applySafeAudioRouting(enable: Boolean) {
         try {
+            // Keep MODE_NORMAL to avoid telephony echo-cancellation buzzing / speaker vibration
+            audioManager.mode = AudioManager.MODE_NORMAL
             if (enable) {
-                // 1. Mute physical microphone so human vocal speech is silenced
                 audioManager.isMicrophoneMute = true
-                _isHardwareMicMuted.value = true
-
-                // 2. If call injection is enabled, switch audio mode to communication
-                if (_isCallInjectionActive.value) {
-                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                } else {
-                    audioManager.mode = AudioManager.MODE_NORMAL
-                }
             } else {
-                // Restore physical microphone and normal audio mode
                 audioManager.isMicrophoneMute = false
-                audioManager.mode = AudioManager.MODE_NORMAL
-                _isHardwareMicMuted.value = false
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -149,97 +115,72 @@ class MusicMicEngine(private val context: Context) {
     }
 
     private fun startMusicPlayback() {
+        stopMusicPlayback()
         val track = _selectedTrack.value
-        try {
-            val usageType = if (_isCallInjectionActive.value) {
-                AudioAttributes.USAGE_VOICE_COMMUNICATION
-            } else {
-                AudioAttributes.USAGE_MEDIA
-            }
 
-            if (track.uri != null) {
-                backgroundMediaPlayer?.release()
-                backgroundMediaPlayer = MediaPlayer().apply {
-                    setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .setUsage(usageType)
-                            .build()
-                    )
-                    setDataSource(context, track.uri)
-                    isLooping = true
-                    prepare()
-                    start()
-                }
-            } else if (track.synthPreset != null) {
-                // Synthesizer playback loop
-                startSynthPlayback(track.synthPreset, usageType)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun startSynthPlayback(preset: SynthPreset, usageType: Int) {
-        stopSynthPlayback()
-        synthPlaybackJob = scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.IO) {
             try {
-                val audioTrack = AudioSynthesizer.createLoopingAudioTrack(preset)
-                audioTrack.play()
-
-                val buffer = ShortArray(2048)
-                var sampleCounter = 0L
-
-                val chords = when (preset) {
-                    SynthPreset.LOFI_CHILL -> listOf(
-                        listOf(261.63, 329.63, 392.00),
-                        listOf(220.00, 261.63, 329.63),
-                        listOf(174.61, 220.00, 261.63),
-                        listOf(196.00, 246.94, 293.66)
-                    )
-                    SynthPreset.ACOUSTIC_GUITAR -> listOf(
-                        listOf(196.00, 246.94, 293.66),
-                        listOf(146.83, 220.00, 293.66),
-                        listOf(164.81, 196.00, 246.94)
-                    )
-                    SynthPreset.UPBEAT_GROOVE -> listOf(
-                        listOf(293.66, 369.99, 440.00),
-                        listOf(220.00, 277.18, 329.63),
-                        listOf(196.00, 246.94, 293.66)
-                    )
-                }
-
-                val chordDuration = AudioSynthesizer.SAMPLE_RATE * 2
-
-                while (isActive && _isMusicOnlyActive.value) {
-                    val currentChord = chords[((sampleCounter / chordDuration) % chords.size).toInt()]
-                    for (i in buffer.indices) {
-                        var sum = 0.0
-                        for (f in currentChord) {
-                            sum += sin(2.0 * Math.PI * f * (sampleCounter.toDouble() / AudioSynthesizer.SAMPLE_RATE))
-                        }
-                        sum = (sum / currentChord.size).coerceIn(-1.0, 1.0)
-                        buffer[i] = (sum * 22000).toInt().toShort()
-                        sampleCounter++
+                if (track.uri != null) {
+                    playUriWithMediaPlayer(track.uri)
+                } else if (track.synthPreset != null) {
+                    // Pre-render a clean WAV file to eliminate speaker buzzing & distortion
+                    val presetFile = File(context.cacheDir, "preset_${track.synthPreset.name}.wav")
+                    if (!presetFile.exists() || presetFile.length() < 1000) {
+                        AudioSynthesizer.renderPresetToWav(track.synthPreset, 12, presetFile)
                     }
-                    audioTrack.write(buffer, 0, buffer.size)
+                    if (presetFile.exists() && presetFile.length() > 0) {
+                        playFileWithMediaPlayer(presetFile)
+                    }
                 }
-
-                audioTrack.stop()
-                audioTrack.release()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
-    private fun stopSynthPlayback() {
-        synthPlaybackJob?.cancel()
-        synthPlaybackJob = null
+    private suspend fun playFileWithMediaPlayer(file: File) = withContext(Dispatchers.Main) {
+        try {
+            backgroundMediaPlayer?.release()
+            backgroundMediaPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                setDataSource(file.absolutePath)
+                isLooping = true
+                setVolume(0.8f, 0.8f) // Clean, balanced, non-distorting volume
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private suspend fun playUriWithMediaPlayer(uri: Uri) = withContext(Dispatchers.Main) {
+        try {
+            backgroundMediaPlayer?.release()
+            backgroundMediaPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                setDataSource(context, uri)
+                isLooping = true
+                setVolume(0.85f, 0.85f)
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun stopMusicPlayback() {
-        stopSynthPlayback()
         try {
             backgroundMediaPlayer?.let {
                 if (it.isPlaying) {
@@ -253,6 +194,9 @@ class MusicMicEngine(private val context: Context) {
         }
     }
 
+    /**
+     * Records a voice note containing 100% music and ZERO microphone speech
+     */
     fun startRecording() {
         if (_isRecording.value) return
 
@@ -261,7 +205,7 @@ class MusicMicEngine(private val context: Context) {
         }
 
         val clipsDir = File(context.filesDir, "saved_clips").apply { mkdirs() }
-        val fileName = "VoiceClip_${System.currentTimeMillis()}.wav"
+        val fileName = "MusicVoice_${System.currentTimeMillis()}.wav"
         val outFile = File(clipsDir, fileName)
         currentRecordingFile = outFile
 
@@ -275,7 +219,7 @@ class MusicMicEngine(private val context: Context) {
             }
         }
 
-        // Generate the audio track in background
+        // Copy user audio or prepare preset
         scope.launch(Dispatchers.IO) {
             val track = _selectedTrack.value
             if (track.uri != null) {
@@ -299,7 +243,7 @@ class MusicMicEngine(private val context: Context) {
             if (outFile != null) {
                 val track = _selectedTrack.value
                 val preset = track.synthPreset ?: SynthPreset.LOFI_CHILL
-                val seconds = maxOf(2, (duration / 1000).toInt())
+                val seconds = maxOf(3, (duration / 1000).toInt())
 
                 if (track.uri == null) {
                     AudioSynthesizer.renderPresetToWav(preset, seconds, outFile)
@@ -310,7 +254,7 @@ class MusicMicEngine(private val context: Context) {
                     val contentUri = FileProvider.getUriForFile(context, authority, outFile)
                     val newClip = RecordedVoiceClip(
                         id = outFile.name,
-                        title = "ভয়েস বার্তা (${outFile.nameWithoutExtension.takeLast(6)})",
+                        title = "মিউজিক ভয়েস বার্তা",
                         filePath = outFile.absolutePath,
                         uri = contentUri,
                         durationMs = duration,
@@ -319,6 +263,7 @@ class MusicMicEngine(private val context: Context) {
                     )
 
                     withContext(Dispatchers.Main) {
+                        _lastRecordedClip.value = newClip
                         _savedClips.value = listOf(newClip) + _savedClips.value
                         onComplete?.invoke(newClip)
                     }
@@ -343,65 +288,6 @@ class MusicMicEngine(private val context: Context) {
         }
     }
 
-    fun playPreview(clip: RecordedVoiceClip) {
-        if (_previewPlayingClipId.value == clip.id) {
-            stopPreview()
-            return
-        }
-
-        stopPreview()
-        try {
-            previewMediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                setDataSource(context, clip.uri)
-                prepare()
-                setOnCompletionListener {
-                    _previewPlayingClipId.value = null
-                }
-                start()
-            }
-            _previewPlayingClipId.value = clip.id
-        } catch (e: Exception) {
-            e.printStackTrace()
-            _previewPlayingClipId.value = null
-        }
-    }
-
-    fun stopPreview() {
-        try {
-            previewMediaPlayer?.let {
-                if (it.isPlaying) {
-                    it.stop()
-                }
-                it.release()
-            }
-            previewMediaPlayer = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        _previewPlayingClipId.value = null
-    }
-
-    fun deleteClip(clip: RecordedVoiceClip) {
-        if (_previewPlayingClipId.value == clip.id) {
-            stopPreview()
-        }
-        try {
-            val file = File(clip.filePath)
-            if (file.exists()) {
-                file.delete()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        _savedClips.value = _savedClips.value.filter { it.id != clip.id }
-    }
-
     private fun loadSavedClips() {
         scope.launch(Dispatchers.IO) {
             val clipsDir = File(context.filesDir, "saved_clips")
@@ -414,13 +300,12 @@ class MusicMicEngine(private val context: Context) {
                 val list = files.mapNotNull { file ->
                     try {
                         val uri = FileProvider.getUriForFile(context, authority, file)
-                        val duration = estimateDuration(file)
                         RecordedVoiceClip(
                             id = file.name,
-                            title = "ভয়েস বার্তা (${file.nameWithoutExtension.takeLast(6)})",
+                            title = "মিউজিক ভয়েস বার্তা",
                             filePath = file.absolutePath,
                             uri = uri,
-                            durationMs = duration,
+                            durationMs = estimateDuration(file),
                             timestamp = file.lastModified(),
                             sizeBytes = file.length()
                         )
@@ -429,6 +314,9 @@ class MusicMicEngine(private val context: Context) {
                     }
                 }
                 _savedClips.value = list
+                if (list.isNotEmpty()) {
+                    _lastRecordedClip.value = list.first()
+                }
             }
         }
     }
@@ -447,34 +335,23 @@ class MusicMicEngine(private val context: Context) {
             var step = 0
             while (isActive) {
                 if (_isMusicOnlyActive.value || _isRecording.value) {
-                    val base = 0.5f + 0.4f * sin(step * 0.25f).toFloat()
-                    _musicLevel.value = base.coerceIn(0.1f, 1.0f)
-
-                    // Simulated room mic pick-up: User may be talking, but output voice is strictly 0%
-                    _rawMicDetectedLevel.value = (0.1f + 0.25f * sin(step * 0.2f).toFloat()).coerceIn(0f, 0.5f)
-                    _transmittedVoiceLevel.value = 0f // Strictly 0% voice reaches listeners
+                    val base = 0.5f + 0.35f * sin(step * 0.22f).toFloat()
+                    _musicLevel.value = base.coerceIn(0.1f, 0.9f)
                 } else {
                     _musicLevel.value = 0f
-                    _rawMicDetectedLevel.value = 0f
-                    _transmittedVoiceLevel.value = 0f
                 }
                 step++
-                delay(70)
+                delay(75)
             }
         }
     }
 
     private fun requestAudioFocus() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val usage = if (_isCallInjectionActive.value) {
-                AudioAttributes.USAGE_VOICE_COMMUNICATION
-            } else {
-                AudioAttributes.USAGE_MEDIA
-            }
             val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(usage)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                 )
@@ -486,17 +363,15 @@ class MusicMicEngine(private val context: Context) {
             @Suppress("DEPRECATION")
             audioManager.requestAudioFocus(
                 null,
-                if (_isCallInjectionActive.value) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC,
+                AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             )
         }
     }
 
     fun release() {
-        applyMicMuteAndCallRouting(false)
+        applySafeAudioRouting(false)
         stopMusicPlayback()
-        stopPreview()
-        synthPlaybackJob?.cancel()
         recordingJob?.cancel()
         visualizerJob?.cancel()
     }
