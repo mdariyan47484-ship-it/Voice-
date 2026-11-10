@@ -63,7 +63,6 @@ import androidx.core.content.ContextCompat
 import com.example.ui.components.AddCustomClipDialog
 import com.example.ui.components.DualVolumeControlCard
 import com.example.ui.components.FloatingOverlayCard
-import com.example.ui.components.InteractiveFloatingSimulator
 import com.example.ui.components.SoundboardGrid
 import com.example.ui.components.WirelessPairingCard
 import com.example.ui.theme.MyApplicationTheme
@@ -75,11 +74,29 @@ import com.example.ui.viewmodel.VoicePrankViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: VoicePrankViewModel by viewModels()
+    private val openAddTrigger = mutableStateOf(false)
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.updateOverlayRunningState()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra("OPEN_ADD_DIALOG", false)) {
+            openAddTrigger.value = true
+        }
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        if (intent?.getBooleanExtra("OPEN_ADD_DIALOG", false) == true) {
+            openAddTrigger.value = true
+        }
 
         setContent {
             MyApplicationTheme {
@@ -96,6 +113,13 @@ class MainActivity : ComponentActivity() {
                 val snackbarMsg by viewModel.snackbarMessage.collectAsState()
 
                 var showAddDialog by remember { mutableStateOf(false) }
+
+                LaunchedEffect(openAddTrigger.value) {
+                    if (openAddTrigger.value) {
+                        showAddDialog = true
+                        openAddTrigger.value = false
+                    }
+                }
                 var hasOverlayPermission by remember {
                     mutableStateOf(
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -253,6 +277,8 @@ class MainActivity : ComponentActivity() {
                                 SoundboardGrid(
                                     clips = allClips,
                                     activePlayingId = activePlayingClipId,
+                                    isPaired = adbState.isConnected,
+                                    onActivatePairing = { viewModel.autoActivateAdb() },
                                     selectedCategory = selectedCategory,
                                     onCategorySelect = { viewModel.setCategory(it) },
                                     onPlayClip = { viewModel.playClip(it) },
@@ -263,16 +289,6 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
-
-                        // Interactive Draggable Floating Bubble Simulator (Active when overlay is on)
-                        InteractiveFloatingSimulator(
-                            isActive = isOverlayActive,
-                            clips = allClips,
-                            onPlayClip = { viewModel.playClip(it) },
-                            onShareClip = { viewModel.shareClip(it, context) },
-                            onAddClip = { showAddDialog = true },
-                            modifier = Modifier.align(Alignment.TopStart)
-                        )
 
                         // Add Custom Clip Dialog
                         if (showAddDialog) {

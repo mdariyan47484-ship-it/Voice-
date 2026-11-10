@@ -59,10 +59,14 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.AudioFile
 
+import androidx.compose.material.icons.filled.CheckCircle
+
 @Composable
 fun SoundboardGrid(
     clips: List<PrankVoiceClip>,
     activePlayingId: String?,
+    isPaired: Boolean = false,
+    onActivatePairing: () -> Unit = {},
     selectedCategory: String,
     onCategorySelect: (String) -> Unit,
     onPlayClip: (PrankVoiceClip) -> Unit,
@@ -80,6 +84,79 @@ fun SoundboardGrid(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
+        // Pairing Gate Status Card
+        if (!isPaired) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("card_pairing_warning"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF3B1E2B)),
+                border = BorderStroke(1.dp, Color(0xFFEF4444))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🔴 NOT PAIRED (Injection Locked)",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFEF4444)
+                            )
+                        )
+                        Text(
+                            text = "Pair device first to activate microphone voice sending",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = Color(0xFFE2E8F0),
+                                fontSize = 11.sp
+                            )
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onActivatePairing,
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonEmerald),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(34.dp).testTag("btn_grid_activate_pair")
+                    ) {
+                        Text("Activate", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    }
+                }
+            }
+        } else {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("card_pairing_active"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF102820)),
+                border = BorderStroke(1.dp, NeonEmerald)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = NeonEmerald, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "🟢 ACTIVATED: 100% Ready to Inject into Calls & Mic",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = NeonEmerald
+                        )
+                    )
+                }
+            }
+        }
         // Hero Import Card for user's phone audio
         Card(
             modifier = Modifier
@@ -339,10 +416,10 @@ fun SoundboardGrid(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = if (isPlaying) "PAIRED & INJECTED ⚡" else "TAP TO INJECT",
+                                    text = if (isPlaying) "✅ SUCCESS • 100% REACHED" else if (isPaired) "▶ SEND TO CALL" else "🔒 LOCKED (PAIR FIRST)",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Black,
-                                    color = if (isPlaying) NeonCyan else Color(clip.accentColor)
+                                    color = if (isPlaying) NeonEmerald else if (isPaired) Color(clip.accentColor) else Color(0xFFEF4444)
                                 )
                             }
 

@@ -105,6 +105,13 @@ class PrankAudioPlayer(private val context: Context) {
     }
 
     suspend fun getOrCreateClipFile(clip: PrankVoiceClip): File = withContext(Dispatchers.IO) {
+        if (clip.soundFilePath != null) {
+            val f = File(clip.soundFilePath)
+            if (f.exists() && f.length() > 0) {
+                return@withContext f
+            }
+        }
+
         val pranksDir = File(context.filesDir, "pranks").apply { mkdirs() }
         val targetFile = File(pranksDir, "clip_${clip.id}.wav")
 
