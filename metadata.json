@@ -1,6 +1,6 @@
 {
-  "name": "MusicMic",
-  "description": "অন করলেই মাইক্রোফোনে মানুষের কথা বন্ধ হয়ে শুধুমাত্র ফোনের গান ও সিস্টেম অডিও শোনা যাবে। ১ ক্লিকে ভয়েস রেকর্ড ও যেকোনো অ্যাপে শেয়ার।",
+  "name": "Voice Prank",
+  "description": "Wireless Debugging & Floating Soundboard to inject clear prank voice clips and audio into mic/calls with monitor controls.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
